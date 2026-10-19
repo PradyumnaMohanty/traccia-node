@@ -268,5 +268,75 @@ describe('@observe Decorator', () => {
             expect(argsCall).toBeDefined();
             expect(argsCall[1].length).toBeLessThanOrEqual(1000);
         });
+
+        it('handles single-param async arrow functions like `async password => ...` without leaking', async () => {
+            // Test comment 1 from review: `async password => ...`
+            const fn = async (password: string) => `auth-${password}`;
+            // Simulating unparenthesized async arrow via function string if compiled or direct
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+
+            await wrapped('my-secret-pass');
+
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('my-secret-pass')
+            );
+        });
+
+        it('correctly splits parameters when default values contain nested objects/commas', async () => {
+            // Test comment 2 from review: `(options = {a: 1, b: 2}, password) => ...`
+            const fn = async (options = { a: 1, b: 2 }, password = 'none') => {
+                return `${options.a}-${password}`;
+            };
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+
+            await wrapped({ a: 10, b: 20 }, 'super-secret-password-123');
+
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('super-secret-password-123')
+            );
+        });
+
+        it('preserves class toJSON() serializers and serializes Date objects properly', async () => {
+            // Test comment 3 from review: credentials object with toJSON() and Date object
+            class Credentials {
+                public username = 'alice';
+                public passwordHash = 'super_secret_hash_value';
+                public createdAt = new Date('2026-10-19T12:00:00.000Z');
+
+                public toJSON() {
+                    return {
+                        username: this.username,
+                        createdAt: this.createdAt,
+                    };
+                }
+            }
+
+            const creds = new Credentials();
+            const fn = async (c: Credentials) => c.username;
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+
+            await wrapped(creds);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exportedJson = JSON.parse(argsCall[1]);
+            // passwordHash should NOT be present (toJSON omitted it)
+            expect(exportedJson[0].passwordHash).toBeUndefined();
+            expect(exportedJson[0].username).toBe('alice');
+            // createdAt should be a serialized ISO string, not `{}`
+            expect(exportedJson[0].createdAt).toBe('2026-10-19T12:00:00.000Z');
+        });
     });
 });

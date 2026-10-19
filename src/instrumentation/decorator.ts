@@ -20,6 +20,92 @@ export interface ObserveOptions {
     guardrailCategory?: string;
 }
 
+function splitTopLevelParams(paramStr: string): string[] {
+    const params: string[] = [];
+    let current = '';
+    let depthParen = 0;
+    let depthBrace = 0;
+    let depthBracket = 0;
+    let inQuote: string | null = null;
+
+    for (let i = 0; i < paramStr.length; i++) {
+        const char = paramStr[i];
+        if (inQuote) {
+            if (char === inQuote && paramStr[i - 1] !== '\\') {
+                inQuote = null;
+            }
+            current += char;
+        } else if (char === '"' || char === "'" || char === '`') {
+            inQuote = char;
+            current += char;
+        } else if (char === '(') {
+            depthParen++;
+            current += char;
+        } else if (char === ')') {
+            if (depthParen > 0) depthParen--;
+            current += char;
+        } else if (char === '{') {
+            depthBrace++;
+            current += char;
+        } else if (char === '}') {
+            if (depthBrace > 0) depthBrace--;
+            current += char;
+        } else if (char === '[') {
+            depthBracket++;
+            current += char;
+        } else if (char === ']') {
+            if (depthBracket > 0) depthBracket--;
+            current += char;
+        } else if (char === ',' && depthParen === 0 && depthBrace === 0 && depthBracket === 0) {
+            params.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    if (current.trim().length > 0) {
+        params.push(current.trim());
+    }
+    return params;
+}
+
+function extractParamName(rawParam: string): string {
+    let param = rawParam.trim();
+    // Strip default value outside braces/parens/brackets e.g. `param = { a: 1 }`
+    let depthParen = 0;
+    let depthBrace = 0;
+    let depthBracket = 0;
+    for (let i = 0; i < param.length; i++) {
+        const c = param[i];
+        if (c === '(') depthParen++;
+        else if (c === ')') { if (depthParen > 0) depthParen--; }
+        else if (c === '{') depthBrace++;
+        else if (c === '}') { if (depthBrace > 0) depthBrace--; }
+        else if (c === '[') depthBracket++;
+        else if (c === ']') { if (depthBracket > 0) depthBracket--; }
+        else if (c === '=' && depthParen === 0 && depthBrace === 0 && depthBracket === 0) {
+            param = param.slice(0, i).trim();
+            break;
+        }
+    }
+    // Strip type annotations outside braces/parens/brackets e.g. `param: string`
+    depthParen = 0; depthBrace = 0; depthBracket = 0;
+    for (let i = 0; i < param.length; i++) {
+        const c = param[i];
+        if (c === '(') depthParen++;
+        else if (c === ')') { if (depthParen > 0) depthParen--; }
+        else if (c === '{') depthBrace++;
+        else if (c === '}') { if (depthBrace > 0) depthBrace--; }
+        else if (c === '[') depthBracket++;
+        else if (c === ']') { if (depthBracket > 0) depthBracket--; }
+        else if (c === ':' && depthParen === 0 && depthBrace === 0 && depthBracket === 0) {
+            param = param.slice(0, i).trim();
+            break;
+        }
+    }
+    return param;
+}
+
 export function getParameterNames(fn: any): string[] {
     if (typeof fn !== 'function') return [];
     try {
@@ -49,63 +135,32 @@ export function getParameterNames(fn: any): string[] {
             }
         } else if (arrow !== -1) {
             paramStr = fnStr.slice(0, arrow).trim();
+            // Handle `async password => ...` by removing leading `async` keyword
+            paramStr = paramStr.replace(/^async\s+/, '').trim();
         }
 
         if (!paramStr.trim()) return [];
 
-        return paramStr
-            .split(',')
-            .map((p) => {
-                let trimmed = p.trim();
-                trimmed = trimmed.replace(/=.*$/, '').trim();
-                trimmed = trimmed.replace(/:.*$/, '').trim();
-                return trimmed;
-            })
+        return splitTopLevelParams(paramStr)
+            .map(extractParamName)
             .filter((p) => p.length > 0 && !p.startsWith('...'));
     } catch {
         return [];
     }
 }
 
-function redactValueWithSkipList(
+export function safeStringify(
     value: unknown,
-    skipSet: Set<string>,
-    seen = new WeakSet<object>()
-): unknown {
-    if (value === null || value === undefined) {
-        return value;
-    }
-    if (typeof value === 'bigint') {
-        return `${value.toString()}n`;
-    }
-    if (typeof value !== 'object') {
-        return value;
-    }
-    if (seen.has(value)) {
-        return '[Circular]';
-    }
-    seen.add(value);
-
-    if (Array.isArray(value)) {
-        return value.map((item) => redactValueWithSkipList(item, skipSet, seen));
-    }
-
-    const obj = value as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(obj)) {
-        if (skipSet.has(key.toLowerCase())) {
-            result[key] = '[REDACTED]';
-        } else {
-            result[key] = redactValueWithSkipList(val, skipSet, seen);
-        }
-    }
-    return result;
-}
-
-export function safeStringify(value: unknown, maxLength = 1000): string {
+    skipSet?: Set<string>,
+    maxLength = 1000
+): string {
     const seen = new WeakSet<object>();
     try {
-        const str = JSON.stringify(value, (_key, val) => {
+        const str = JSON.stringify(value, (key, val) => {
+            // Apply key-level redaction on serialized representation, preserving class toJSON() and Date
+            if (key && skipSet && skipSet.has(key.toLowerCase())) {
+                return '[REDACTED]';
+            }
             if (typeof val === 'bigint') {
                 return `${val.toString()}n`;
             }
@@ -148,13 +203,10 @@ export function safeSerializeArgs(
         if ((paramName && skipSet.has(paramName)) || skipSet.has(String(idx))) {
             return '[REDACTED]';
         }
-        if (skipSet.size > 0 && typeof arg === 'object' && arg !== null) {
-            return redactValueWithSkipList(arg, skipSet);
-        }
         return arg;
     });
 
-    return safeStringify(processedArgs, maxLength);
+    return safeStringify(processedArgs, skipSet, maxLength);
 }
 
 /**
