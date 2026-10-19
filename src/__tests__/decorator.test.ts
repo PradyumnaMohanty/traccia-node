@@ -338,5 +338,69 @@ describe('@observe Decorator', () => {
             // createdAt should be a serialized ISO string, not `{}`
             expect(exportedJson[0].createdAt).toBe('2026-10-19T12:00:00.000Z');
         });
+
+        it('redacts nested object properties and arrays of objects matching skipArgs', async () => {
+            const processBatch = async (payload: any) => 'processed';
+            const wrapped = observe({ skipArgs: ['password', 'apiKey'] })(processBatch);
+
+            await wrapped({
+                account: 'acc_123',
+                creds: {
+                    apiKey: 'sensitive_key_val',
+                },
+                users: [
+                    { name: 'u1', password: 'secret_user_1' },
+                    { name: 'u2', password: 'secret_user_2' },
+                ],
+            });
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0].creds.apiKey).toBe('[REDACTED]');
+            expect(exported[0].users[0].password).toBe('[REDACTED]');
+            expect(exported[0].users[1].password).toBe('[REDACTED]');
+            expect(argsCall[1]).not.toContain('sensitive_key_val');
+            expect(argsCall[1]).not.toContain('secret_user_1');
+            expect(argsCall[1]).not.toContain('secret_user_2');
+        });
+
+        it('redacts by positional index when specified in skipArgs', async () => {
+            const fn = async (unnamed0: string, unnamed1: string) => 'ok';
+            const wrapped = observe({ skipArgs: ['1'] })(fn);
+
+            await wrapped('public-data', 'sensitive-index-1-data');
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('public-data');
+            expect(exported[1]).toBe('[REDACTED]');
+        });
+
+        it('fails closed and outputs [REDACTED] if serialization encounters an error when redacting', async () => {
+            // An object with a throwing getter when stringified
+            const bomb: any = {
+                get badProperty() {
+                    throw new Error('Explosion during stringify');
+                },
+            };
+            const fn = async (data: any) => 'safe';
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+
+            // Application execution should proceed safely
+            const result = await wrapped(bomb);
+            expect(result).toBe('safe');
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            // Fails closed: does NOT leak unredacted properties
+            expect(argsCall[1]).toBe('[REDACTED]');
+        });
     });
 });
