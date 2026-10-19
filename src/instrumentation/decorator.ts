@@ -12,10 +12,149 @@ export interface ObserveOptions {
     asType?: 'span' | 'tool' | 'llm' | 'guardrail';
     as_type?: 'span' | 'tool' | 'llm' | 'guardrail';
     skipArgs?: string[];
+    skip_args?: string[];
     skipResult?: boolean;
+    skip_result?: boolean;
     tags?: string[];
     guardrailName?: string;
     guardrailCategory?: string;
+}
+
+export function getParameterNames(fn: any): string[] {
+    if (typeof fn !== 'function') return [];
+    try {
+        let fnStr = Function.prototype.toString.call(fn);
+        fnStr = fnStr.replace(/\/\/[^\n\r]*/g, '');
+        fnStr = fnStr.replace(/\/\*[\s\S]*?\*\//g, '');
+
+        const openParen = fnStr.indexOf('(');
+        const arrow = fnStr.indexOf('=>');
+
+        let paramStr = '';
+        if (openParen !== -1 && (arrow === -1 || openParen < arrow)) {
+            let depth = 0;
+            let closeParen = -1;
+            for (let i = openParen; i < fnStr.length; i++) {
+                if (fnStr[i] === '(') depth++;
+                else if (fnStr[i] === ')') {
+                    depth--;
+                    if (depth === 0) {
+                        closeParen = i;
+                        break;
+                    }
+                }
+            }
+            if (closeParen !== -1) {
+                paramStr = fnStr.slice(openParen + 1, closeParen);
+            }
+        } else if (arrow !== -1) {
+            paramStr = fnStr.slice(0, arrow).trim();
+        }
+
+        if (!paramStr.trim()) return [];
+
+        return paramStr
+            .split(',')
+            .map((p) => {
+                let trimmed = p.trim();
+                trimmed = trimmed.replace(/=.*$/, '').trim();
+                trimmed = trimmed.replace(/:.*$/, '').trim();
+                return trimmed;
+            })
+            .filter((p) => p.length > 0 && !p.startsWith('...'));
+    } catch {
+        return [];
+    }
+}
+
+function redactValueWithSkipList(
+    value: unknown,
+    skipSet: Set<string>,
+    seen = new WeakSet<object>()
+): unknown {
+    if (value === null || value === undefined) {
+        return value;
+    }
+    if (typeof value === 'bigint') {
+        return `${value.toString()}n`;
+    }
+    if (typeof value !== 'object') {
+        return value;
+    }
+    if (seen.has(value)) {
+        return '[Circular]';
+    }
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+        return value.map((item) => redactValueWithSkipList(item, skipSet, seen));
+    }
+
+    const obj = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(obj)) {
+        if (skipSet.has(key.toLowerCase())) {
+            result[key] = '[REDACTED]';
+        } else {
+            result[key] = redactValueWithSkipList(val, skipSet, seen);
+        }
+    }
+    return result;
+}
+
+export function safeStringify(value: unknown, maxLength = 1000): string {
+    const seen = new WeakSet<object>();
+    try {
+        const str = JSON.stringify(value, (_key, val) => {
+            if (typeof val === 'bigint') {
+                return `${val.toString()}n`;
+            }
+            if (typeof val === 'object' && val !== null) {
+                if (seen.has(val)) {
+                    return '[Circular]';
+                }
+                seen.add(val);
+            }
+            return val;
+        });
+        return (str ?? String(value)).slice(0, maxLength);
+    } catch {
+        try {
+            return String(value).slice(0, maxLength);
+        } catch {
+            return '[Unserializable]';
+        }
+    }
+}
+
+export function safeSerializeArgs(
+    fn: any,
+    args: any[],
+    skipArgs?: string[],
+    maxLength = 1000
+): string {
+    if (!args || args.length === 0) {
+        return '[]';
+    }
+
+    const skipSet = new Set(
+        (skipArgs || []).map((s) => String(s).toLowerCase().trim())
+    );
+
+    const paramNames = getParameterNames(fn);
+
+    const processedArgs = args.map((arg, idx) => {
+        const paramName = paramNames[idx]?.toLowerCase();
+        if ((paramName && skipSet.has(paramName)) || skipSet.has(String(idx))) {
+            return '[REDACTED]';
+        }
+        if (skipSet.size > 0 && typeof arg === 'object' && arg !== null) {
+            return redactValueWithSkipList(arg, skipSet);
+        }
+        return arg;
+    });
+
+    return safeStringify(processedArgs, maxLength);
 }
 
 /**
@@ -76,13 +215,12 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
             attributes['span.tags'] = options.tags;
         }
 
-        // Capture arguments
-        if (options.skipArgs) {
-            // Simple index-based capture or similar matching could be implemented here
-            // For now, simpler than Python's introspection:
-            attributes['function.args'] = JSON.stringify(args).slice(0, 1000);
-        } else {
-            attributes['function.args'] = JSON.stringify(args).slice(0, 1000);
+        // Capture arguments safely
+        const skipArgsList = options.skipArgs || options.skip_args;
+        try {
+            attributes['function.args'] = safeSerializeArgs(fn, args, skipArgsList);
+        } catch {
+            // Telemetry capture failures must not stop ordinary application execution
         }
 
         // Auto-set guardrail attributes if type is guardrail
@@ -121,7 +259,7 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
                 }
 
                 // Capture result
-                if (!options.skipResult) {
+                if (!options.skipResult && !options.skip_result) {
                     try {
                         const resStr = typeof result === 'string' ? result : JSON.stringify(result);
                         span.setAttribute('result', resStr.slice(0, 1000));

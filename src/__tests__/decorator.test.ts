@@ -158,4 +158,115 @@ describe('@observe Decorator', () => {
             expect(result).toBe(target);
         });
     });
+
+    describe('TRC-292: skipArgs redaction & safe serialization', () => {
+        it('redacts positional arguments matching skipArgs by parameter name', async () => {
+            const login = async (username: string, password: string) => {
+                return `user-${username}`;
+            };
+            const wrapped = observe({ skipArgs: ['password'] })(login);
+
+            const result = await wrapped('alice', 'synthetic-super-secret-password');
+
+            expect(result).toBe('user-alice');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('synthetic-super-secret-password')
+            );
+        });
+
+        it('redacts object properties matching skipArgs', async () => {
+            const login = async (creds: { username: string; password: string }) => {
+                return creds.username;
+            };
+            const wrapped = observe({ skipArgs: ['password'] })(login);
+
+            const result = await wrapped({
+                username: 'alice',
+                password: 'synthetic-super-secret-password',
+            });
+
+            expect(result).toBe('alice');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('synthetic-super-secret-password')
+            );
+        });
+
+        it('supports skip_args snake_case alias', async () => {
+            const handler = async (secretKey: string) => 'ok';
+            const wrapped = observe({ skip_args: ['secretKey'] })(handler);
+
+            await wrapped('my-secret-token');
+
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('my-secret-token')
+            );
+        });
+
+        it('safely serializes BigInt arguments without throwing and executes application function', async () => {
+            let invokedWith: bigint | null = null;
+            const processBigInt = async (amount: bigint) => {
+                invokedWith = amount;
+                return amount * 2n;
+            };
+            const wrapped = observe({ name: 'bigint-test' })(processBigInt);
+
+            const result = await wrapped(9007199254740993n);
+
+            expect(result).toBe(18014398509481986n);
+            expect(invokedWith).toBe(9007199254740993n);
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('9007199254740993n')
+            );
+        });
+
+        it('safely serializes circular arguments without throwing and executes application function', async () => {
+            let invoked = false;
+            const circular: any = { name: 'cycle' };
+            circular.self = circular;
+
+            const processCircular = async (input: any) => {
+                invoked = true;
+                return input.name;
+            };
+            const wrapped = observe({ name: 'circular-test' })(processCircular);
+
+            const result = await wrapped(circular);
+
+            expect(invoked).toBe(true);
+            expect(result).toBe('cycle');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[Circular]')
+            );
+        });
+
+        it('bounds function.args string length to 1000 characters', async () => {
+            const longString = 'a'.repeat(2000);
+            const fn = async (text: string) => text.length;
+            const wrapped = observe({})(fn);
+
+            await wrapped(longString);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((c: any[]) => c[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            expect(argsCall[1].length).toBeLessThanOrEqual(1000);
+        });
+    });
 });
