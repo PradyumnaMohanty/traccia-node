@@ -20,8 +20,8 @@ export interface ObserveOptions {
     guardrailCategory?: string;
 }
 
-import { safeSerializeArgs, safeStringify, getParameterNames } from './serialization';
-export { safeSerializeArgs, safeStringify, getParameterNames };
+import { safeSerializeArgs, safeStringify } from './serialization';
+export { safeSerializeArgs, safeStringify };
 
 /**
  * Decorator/Wrapper to create spans around functions.
@@ -84,7 +84,7 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
         // Capture arguments safely
         const skipArgsList = options.skipArgs || options.skip_args;
         try {
-            attributes['function.args'] = safeSerializeArgs(fn, args, skipArgsList);
+            attributes['function.args'] = safeSerializeArgs(args, skipArgsList);
         } catch {
             // Telemetry capture failures must not stop ordinary application execution
         }

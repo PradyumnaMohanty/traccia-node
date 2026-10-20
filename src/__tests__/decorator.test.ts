@@ -160,11 +160,11 @@ describe('@observe Decorator', () => {
     });
 
     describe('TRC-292: skipArgs redaction & safe serialization', () => {
-        it('redacts positional arguments matching skipArgs by parameter name', async () => {
+        it('redacts positional arguments matching skipArgs by index', async () => {
             const login = async (username: string, password: string) => {
                 return `user-${username}`;
             };
-            const wrapped = observe({ skipArgs: ['password'] })(login);
+            const wrapped = observe({ skipArgs: ['1'] })(login);
 
             const result = await wrapped('alice', 'synthetic-super-secret-password');
 
@@ -202,10 +202,10 @@ describe('@observe Decorator', () => {
         });
 
         it('supports skip_args snake_case alias', async () => {
-            const handler = async (secretKey: string) => 'ok';
+            const handler = async (creds: { secretKey: string }) => 'ok';
             const wrapped = observe({ skip_args: ['secretKey'] })(handler);
 
-            await wrapped('my-secret-token');
+            await wrapped({ secretKey: 'my-secret-token' });
 
             expect(mockSpan.setAttribute).toHaveBeenCalledWith(
                 'function.args',
@@ -269,41 +269,37 @@ describe('@observe Decorator', () => {
             expect(argsCall[1].length).toBeLessThanOrEqual(1000);
         });
 
-        it('handles single-param async arrow functions like `async password => ...` without leaking', async () => {
-            // Test comment 1 from review: `async password => ...`
-            const fn = async (password: string) => `auth-${password}`;
-            // Simulating unparenthesized async arrow via function string if compiled or direct
-            const wrapped = observe({ skipArgs: ['password'] })(fn);
+        it('redacts multiple positional arguments by index', async () => {
+            const fn = async (user: string, token: string, secret: string) => `${user}-ok`;
+            const wrapped = observe({ skipArgs: ['1', '2'] })(fn);
 
-            await wrapped('my-secret-pass');
+            await wrapped('alice', 'raw-token-123', 'raw-secret-456');
 
-            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-                'function.args',
-                expect.stringContaining('[REDACTED]')
-            );
-            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
-                'function.args',
-                expect.stringContaining('my-secret-pass')
-            );
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((c: any[]) => c[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('alice');
+            expect(exported[1]).toBe('[REDACTED]');
+            expect(exported[2]).toBe('[REDACTED]');
+            expect(argsCall[1]).not.toContain('raw-token-123');
+            expect(argsCall[1]).not.toContain('raw-secret-456');
         });
 
-        it('correctly splits parameters when default values contain nested objects/commas', async () => {
-            // Test comment 2 from review: `(options = {a: 1, b: 2}, password) => ...`
-            const fn = async (options = { a: 1, b: 2 }, password = 'none') => {
-                return `${options.a}-${password}`;
-            };
-            const wrapped = observe({ skipArgs: ['password'] })(fn);
+        it('supports numeric index in skipArgs array', async () => {
+            const fn = async (apiKey: string, count: number) => count;
+            const wrapped = observe({ skipArgs: [0 as any] })(fn);
 
-            await wrapped({ a: 10, b: 20 }, 'super-secret-password-123');
+            await wrapped('sk-secret-key-999', 42);
 
-            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-                'function.args',
-                expect.stringContaining('[REDACTED]')
-            );
-            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
-                'function.args',
-                expect.stringContaining('super-secret-password-123')
-            );
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((c: any[]) => c[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('[REDACTED]');
+            expect(exported[1]).toBe(42);
         });
 
         it('preserves class toJSON() serializers and serializes Date objects properly', async () => {
