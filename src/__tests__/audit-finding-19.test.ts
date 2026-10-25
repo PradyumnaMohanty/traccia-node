@@ -9,12 +9,14 @@
  *    and tracestate is propagated.
  */
 
-import { trace } from '@opentelemetry/api';
+import { EventEmitter } from 'events';
+import { trace, context as otelContext } from '@opentelemetry/api';
 import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
 import { TracerProvider } from '../tracer/provider';
 import { getCurrentSpan, runWithSpan, spanScope } from '../context';
 import { expressMiddleware } from '../instrumentation/express';
 import { fastifyPlugin } from '../instrumentation/fastify';
+import { GuardrailDetectorProcessor } from '../processor/guardrail-detector';
 import { ISpan } from '../types';
 
 describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
@@ -276,6 +278,255 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
         expect(child.context.traceState).toBe('alpha=one');
         child.end();
       });
+    });
+  });
+
+  describe('Reproduction 4: Bound callbacks preserve dynamic this receiver (Comment 2)', () => {
+    it('forwards the dynamic this receiver to bound functions instead of passing undefined', () => {
+      const tracer = tracciaProvider.getTracer('test-this-receiver');
+      const testSpan = tracer.startSpan('this-receiver-span');
+
+      const fakeResponse = {
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req-42' } as Record<string, string>,
+        getHeader(name: string): string | undefined {
+          return this.headers[name.toLowerCase()];
+        },
+      };
+
+      const activeCtx = otelContext.active();
+      // Bind callback to active context
+      const boundGetHeader = otelContext.bind(activeCtx, fakeResponse.getHeader);
+
+      // Invoking bound callback with dynamic receiver 'fakeResponse' must not throw
+      expect(() => {
+        const ct = boundGetHeader.call(fakeResponse, 'content-type');
+        expect(ct).toBe('application/json');
+      }).not.toThrow();
+
+      expect(boundGetHeader.call(fakeResponse, 'x-request-id')).toBe('req-42');
+      testSpan.end();
+    });
+  });
+
+  describe('Reproduction 5: EventEmitter context binding preserves active span (Comment 3)', () => {
+    it('propagates bound context into listeners registered on bound EventEmitter', (done) => {
+      const tracer = tracciaProvider.getTracer('test-ee-binding');
+      const parentSpan = tracer.startSpan('ee-parent-span');
+
+      runWithSpan(parentSpan, () => {
+        const ee = new EventEmitter();
+        const activeCtx = otelContext.active();
+
+        // Bind emitter to current context
+        const boundEE = otelContext.bind(activeCtx, ee);
+
+        // Register listener on bound emitter
+        boundEE.on('data', () => {
+          try {
+            // Listener should run with parentSpan active in OTel context
+            const activeSpan = trace.getActiveSpan();
+            expect(activeSpan?.spanContext().spanId).toBe(parentSpan.context.spanId);
+            expect(activeSpan?.spanContext().traceId).toBe(parentSpan.context.traceId);
+            done();
+          } catch (err) {
+            done(err);
+          } finally {
+            parentSpan.end();
+          }
+        });
+
+        // Emit from an isolated/different context
+        otelContext.with(trace.setSpanContext(otelContext.active(), {
+          traceId: '11111111111111111111111111111111',
+          spanId: '2222222222222222',
+          traceFlags: 1,
+        }), () => {
+          ee.emit('data');
+        });
+      });
+    });
+  });
+
+  describe('Reproduction 6: Remote trace headers finalize guardrail state at local request boundary (Comment 1)', () => {
+    it('Express middleware finalizes guardrail state despite remote parent and retains 0 traces in memory', (done) => {
+      const guardrailProcessor = new GuardrailDetectorProcessor();
+      tracciaProvider.addSpanProcessor(guardrailProcessor);
+
+      const incomingTraceId = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+      const incomingSpanId = '1234567890abcdef';
+      const incomingTraceState = 'vendor=traccia,env=prod';
+      const traceparent = `00-${incomingTraceId}-${incomingSpanId}-01`;
+
+      const listeners: Record<string, Function[]> = {};
+      const req: any = {
+        method: 'POST',
+        url: '/api/chat',
+        path: '/api/chat',
+        headers: {
+          traceparent,
+          tracestate: incomingTraceState,
+        },
+      };
+
+      const res: any = {
+        statusCode: 200,
+        on: jest.fn((event: string, cb: Function) => {
+          listeners[event] = listeners[event] || [];
+          listeners[event].push(cb);
+        }),
+      };
+
+      // Ensure getTracer uses tracciaProvider with our guardrail processor
+      const autoModule = require('../auto');
+      const originalGetTracer = autoModule.getTracer;
+      autoModule.getTracer = (name: string) => tracciaProvider.getTracer(name);
+
+      try {
+        const middleware = expressMiddleware();
+        middleware(req, res, () => {
+          const requestSpan = req._tracciaSpan;
+          expect(requestSpan).toBeDefined();
+          expect(requestSpan.context.traceId).toBe(incomingTraceId);
+          expect(requestSpan.parentSpanId).toBe(incomingSpanId);
+          expect(requestSpan.isLocalRoot).toBe(true);
+
+          // During request execution, guardrail state is accumulated
+          expect(guardrailProcessor.getTraceCount()).toBe(0); // Before any span ends
+
+          // Add a guardrail child span inside request
+          const tracer = tracciaProvider.getTracer('chat-agent');
+          const childSpan = tracer.startSpan('llm-call', {
+            attributes: {
+              'prompt': 'Hello world',
+            },
+          });
+          childSpan.end();
+
+          // After child span ends, state is accumulated for the trace
+          expect(guardrailProcessor.getTraceCount()).toBe(1);
+
+          // Now response finishes at local request boundary
+          for (const cb of listeners['finish'] || []) {
+            cb();
+          }
+
+          // Guardrail state should be finalized at the local boundary!
+          // 1. Guardrail summary should be written onto requestSpan
+          expect(requestSpan.attributes['guardrail.summary']).toBeDefined();
+          expect(requestSpan.attributes['guardrail.summary.coverage_confidence']).toBeDefined();
+
+          // 2. Trace state should be deleted from memory - 0 retained traces!
+          expect(guardrailProcessor.getTraceCount()).toBe(0);
+
+          done();
+        });
+      } finally {
+        autoModule.getTracer = originalGetTracer;
+      }
+    });
+
+    it('100 completed requests with remote traceparent and tracestate retain 0 traces in memory', () => {
+      const guardrailProcessor = new GuardrailDetectorProcessor();
+      tracciaProvider.addSpanProcessor(guardrailProcessor);
+
+      const autoModule = require('../auto');
+      const originalGetTracer = autoModule.getTracer;
+      autoModule.getTracer = (name: string) => tracciaProvider.getTracer(name);
+
+      try {
+        const middleware = expressMiddleware();
+
+        for (let i = 0; i < 100; i++) {
+          const hexIdx = i.toString(16).padStart(4, '0');
+          const incomingTraceId = `11223344556677889900aabbccdd${hexIdx}`;
+          const incomingSpanId = `aabbccdd${hexIdx}`;
+          const traceparent = `00-${incomingTraceId}-${incomingSpanId}-01`;
+          const tracestate = `rojo=1,req=${i}`;
+
+          const listeners: Record<string, Function[]> = {};
+          const req: any = {
+            method: 'GET',
+            url: `/api/items/${i}`,
+            path: `/api/items/${i}`,
+            headers: {
+              traceparent,
+              tracestate,
+            },
+          };
+
+          const res: any = {
+            statusCode: 200,
+            on: jest.fn((event: string, cb: Function) => {
+              listeners[event] = listeners[event] || [];
+              listeners[event].push(cb);
+            }),
+          };
+
+          middleware(req, res, () => {
+            // Finish the response
+            for (const cb of listeners['finish'] || []) {
+              cb();
+            }
+          });
+        }
+
+        // 100 completed requests must retain 0 traces in memory
+        expect(guardrailProcessor.getTraceCount()).toBe(0);
+      } finally {
+        autoModule.getTracer = originalGetTracer;
+      }
+    });
+
+    it('Fastify plugin finalizes guardrail state despite remote parent and retains 0 traces in memory', () => {
+      const guardrailProcessor = new GuardrailDetectorProcessor();
+      tracciaProvider.addSpanProcessor(guardrailProcessor);
+
+      const autoModule = require('../auto');
+      const originalGetTracer = autoModule.getTracer;
+      autoModule.getTracer = (name: string) => tracciaProvider.getTracer(name);
+
+      try {
+        const incomingTraceId = '778899aabbccddeeff00112233445566';
+        const incomingSpanId = 'fedcba9876543210';
+        const traceparent = `00-${incomingTraceId}-${incomingSpanId}-01`;
+        const tracestate = 'tenant=acme,tier=gold';
+
+        const hooks: Record<string, Function> = {};
+        const mockFastify: any = {
+          addHook: jest.fn((name, handler) => {
+            hooks[name] = handler;
+          }),
+        };
+
+        const plugin = fastifyPlugin();
+        plugin(mockFastify, {}, () => {});
+
+        const req: any = {
+          method: 'POST',
+          url: '/fastify-route',
+          routerPath: '/fastify-route',
+          headers: {
+            traceparent,
+            tracestate,
+          },
+        };
+
+        // onRequest hook
+        hooks['onRequest'](req, {}, () => {});
+
+        const requestSpan = req._tracciaSpan;
+        expect(requestSpan).toBeDefined();
+        expect(requestSpan.isLocalRoot).toBe(true);
+
+        // onResponse hook (request completion)
+        hooks['onResponse'](req, { statusCode: 200 }, () => {});
+
+        // Summary written on requestSpan and 0 traces retained in memory
+        expect(requestSpan.attributes['guardrail.summary']).toBeDefined();
+        expect(guardrailProcessor.getTraceCount()).toBe(0);
+      } finally {
+        autoModule.getTracer = originalGetTracer;
+      }
     });
   });
 });

@@ -143,6 +143,8 @@ export function fastifyPlugin(options: FastifyTracingOptions = {}) {
                 ? tracer.startSpan(name, { parentContext })
                 : tracer.startSpan(name);
 
+            span.isLocalRoot = true;
+
             // Set basic attributes
             span.setAttribute('span.type', 'TOOL');
             span.setAttribute('http.method', request.method);

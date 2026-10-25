@@ -31,17 +31,25 @@ interface TraceState {
  * Guardrail detector processor.
  */
 export class GuardrailDetectorProcessor implements ISpanProcessor {
+  private static readonly MAX_TRACES = 10000;
   private heuristicsEnabled: boolean;
   private traces: Map<string, TraceState> = new Map();
 
-  constructor(options?: GuardrailDetectorOptions) {
+  public constructor(options?: GuardrailDetectorOptions) {
     this.heuristicsEnabled = options?.heuristicsEnabled ?? true;
+  }
+
+  /**
+   * Return number of active traces currently in memory.
+   */
+  public getTraceCount(): number {
+    return this.traces.size;
   }
 
   /**
    * Called before OTel span.end(); span is still mutable.
    */
-  onEnd(span: ISpan): void {
+  public onEnd(span: ISpan): void {
     try {
       const attrs = span.attributes;
       const spanId = span.context.spanId;
@@ -77,6 +85,12 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
       // Accumulate into trace-scoped state
       let state = this.traces.get(traceId);
       if (!state) {
+        if (this.traces.size >= GuardrailDetectorProcessor.MAX_TRACES) {
+          const oldestKey: string | undefined = this.traces.keys().next().value as string | undefined;
+          if (oldestKey !== undefined) {
+            this.traces.delete(oldestKey);
+          }
+        }
         state = { spanAttrs: [], spanIds: [], findings: [] };
         this.traces.set(traceId, state);
       }
@@ -84,10 +98,10 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
       state.spanIds.push(spanId);
       state.findings.push(...findings);
 
-      // If this is the root span, compute and write the aggregated summary
-      // Root span has no parent
-      const isRoot = !span.context.traceState || span.parentSpanId === undefined;
-      if (isRoot) {
+      // If this is the root span or local request boundary, compute and write the aggregated summary
+      // Finalize state at the local request boundary despite a remote parent
+      const isLocalRoot = span.isLocalRoot ?? (span.parentSpanId === undefined || Boolean(span.isRemoteParent));
+      if (isLocalRoot) {
         this.writeSummary(span, traceId);
       }
     } catch (exc) {
@@ -160,11 +174,11 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
     }
   }
 
-  shutdown(): void {
+  public shutdown(): void {
     this.traces.clear();
   }
 
-  forceFlush(_timeout?: number): void {
+  public forceFlush(_timeout?: number): void {
     // No-op - guardrails are computed on span end, not batched
   }
 }

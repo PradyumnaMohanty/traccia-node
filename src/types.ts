@@ -53,6 +53,8 @@ export interface ISpan {
   recordException(error: Error, attributes?: Record<string, unknown>): void;
   isRecording(): boolean;
   otelSpan?: OTelSpan;
+  isRemoteParent?: boolean;
+  isLocalRoot?: boolean;
 }
 
 /**

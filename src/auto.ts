@@ -105,7 +105,9 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   const basicProvider = new BasicTracerProvider();
   trace.setGlobalTracerProvider(basicProvider);
-  otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager());
+  const contextManager = new AsyncLocalStorageContextManager();
+  contextManager.enable();
+  otelContext.setGlobalContextManager(contextManager);
 
   // Load environment
   if (config.loadEnv !== false) {

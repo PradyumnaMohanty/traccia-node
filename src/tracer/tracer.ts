@@ -40,9 +40,13 @@ export class Tracer implements ITracer {
     }
   ): ISpan {
     let activeContext = otelContext.active();
+    let isRemoteParent = false;
+    let isLocalRoot = false;
 
     if (options?.parentContext) {
       // Create a remote span context and set it as active
+      isRemoteParent = true;
+      isLocalRoot = true;
       const traceState = options.parentContext.traceState
         ? (typeof options.parentContext.traceState === 'string'
             ? createTraceState(options.parentContext.traceState)
@@ -61,11 +65,20 @@ export class Tracer implements ITracer {
     } else if (options?.parent === null) {
       // Explicitly detach from current active span context
       activeContext = ROOT_CONTEXT;
+      isLocalRoot = true;
     } else {
       // Automatically pull parent from Traccia context if available
       const currentSpan = getCurrentSpan();
       if (currentSpan) {
         activeContext = getOtelContextForSpan(currentSpan);
+      } else {
+        const activeSpanContext = trace.getSpanContext(activeContext);
+        if (activeSpanContext?.isRemote) {
+          isRemoteParent = true;
+          isLocalRoot = true;
+        } else if (!activeSpanContext || !activeSpanContext.traceId) {
+          isLocalRoot = true;
+        }
       }
     }
 
@@ -75,8 +88,19 @@ export class Tracer implements ITracer {
 
     const otelSpan = this.otelTracer.startSpan(name, otelOptions, activeContext);
     const parentSpanId = trace.getSpanContext(activeContext)?.spanId;
+    if (parentSpanId === undefined) {
+      isLocalRoot = true;
+    }
 
-    return new Span(name, otelSpan, this.provider, parentSpanId, options?.attributes);
+    return new Span(
+      name,
+      otelSpan,
+      this.provider,
+      parentSpanId,
+      options?.attributes,
+      isRemoteParent,
+      isLocalRoot
+    );
   }
 
   /**

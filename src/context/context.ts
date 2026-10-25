@@ -8,51 +8,16 @@ import {
   trace,
   createTraceState,
   Context,
-  ContextManager,
-  ROOT_CONTEXT,
 } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { ISpan } from '../types';
 
-/**
- * AsyncLocalStorage-based ContextManager for OpenTelemetry.
- */
-export class AsyncLocalStorageContextManager implements ContextManager {
-  private storage = new AsyncLocalStorage<Context>();
+export { AsyncLocalStorageContextManager };
 
-  public active(): Context {
-    return this.storage.getStore() ?? ROOT_CONTEXT;
-  }
-
-  public with<A extends unknown[], F extends (...args: A) => ReturnType<F>>(
-    context: Context,
-    fn: F,
-    thisArg?: ThisParameterType<F>,
-    ...args: A
-  ): ReturnType<F> {
-    return this.storage.run(context, (): ReturnType<F> => (fn.call(thisArg, ...args) as ReturnType<F>));
-  }
-
-  public bind<T>(context: Context, target: T): T {
-    if (typeof target === 'function') {
-      return ((...args: unknown[]): unknown => {
-        return this.with(context, target as (...a: unknown[]) => unknown, undefined, ...args);
-      }) as unknown as T;
-    }
-    return target;
-  }
-
-  public enable(): this {
-    return this;
-  }
-
-  public disable(): this {
-    this.storage.disable();
-    return this;
-  }
-}
-
-// Automatically register our context manager if one is not already set
-otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager());
+// Automatically register standard OTel context manager if one is not already set
+const defaultContextManager = new AsyncLocalStorageContextManager();
+defaultContextManager.enable();
+otelContext.setGlobalContextManager(defaultContextManager);
 
 interface SpanContext {
   span?: ISpan;
