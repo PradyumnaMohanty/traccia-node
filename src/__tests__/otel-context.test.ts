@@ -1,12 +1,5 @@
 /**
- * Regression and verification test suite for Audit Finding 19 (2026-10-09).
- *
- * Covers:
- * 1. Native OTel child inside active Traccia span shares trace and parent.
- * 2. Express and Fastify middlewares extract incoming W3C trace context and make
- *    request span active for next() / hookDone().
- * 3. Explicit parent traceFlags=0 is preserved (not coerced to 1 via || 1)
- *    and tracestate is propagated.
+ * Verification test suite for OpenTelemetry context bridging and propagation.
  */
 
 import { EventEmitter } from 'events';
@@ -19,7 +12,7 @@ import { fastifyPlugin } from '../instrumentation/fastify';
 import { GuardrailDetectorProcessor } from '../processor/guardrail-detector';
 import { ISpan } from '../types';
 
-describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
+describe('OpenTelemetry Context Bridging and Propagation', () => {
   let basicProvider: BasicTracerProvider;
   let tracciaProvider: TracerProvider;
 
@@ -32,20 +25,18 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     tracciaProvider = new TracerProvider();
   });
 
-  describe('Reproduction 1: Active Traccia span bridges to OTel context', () => {
+  describe('Active Traccia span bridging to OpenTelemetry context', () => {
     it('native OTel child inside active Traccia span shares trace and parent span', async () => {
       const tracer = tracciaProvider.getTracer('test-bridge');
 
       await tracer.startActiveSpan('traccia-active', async (activeSpan) => {
         expect(getCurrentSpan()).toBe(activeSpan);
 
-        // Active OTel span matches the Traccia span's underlying OTel span
         const activeOtelSpan = trace.getActiveSpan();
         expect(activeOtelSpan).toBeDefined();
         expect(activeOtelSpan?.spanContext().spanId).toBe(activeSpan.context.spanId);
         expect(activeOtelSpan?.spanContext().traceId).toBe(activeSpan.context.traceId);
 
-        // Native OTel child created inside active Traccia span
         const nativeTracer = trace.getTracer('native-lib');
         const nativeChild = nativeTracer.startSpan('native-child');
 
@@ -59,11 +50,10 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
       });
     });
 
-    it('spanScope.run and spanScope.runAsync bridge to OTel context', async () => {
+    it('spanScope.run and spanScope.runAsync bridge to OpenTelemetry context', async () => {
       const scope = spanScope('scope-parent', { tracerName: 'scope-tracer' });
       const parentSpan = scope.span;
 
-      // Synchronous run
       scope.run(() => {
         const nativeTracer = trace.getTracer('native-sync');
         const nativeChild = nativeTracer.startSpan('native-child-sync');
@@ -75,7 +65,6 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
         }
       });
 
-      // Asynchronous run
       await scope.runAsync(async () => {
         const nativeTracer = trace.getTracer('native-async');
         const nativeChild = nativeTracer.startSpan('native-child-async');
@@ -91,7 +80,7 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     });
   });
 
-  describe('Reproduction 2: Express & Fastify middleware extract W3C context & activate span', () => {
+  describe('HTTP middleware trace context extraction and activation', () => {
     it('Express middleware extracts incoming traceparent and makes request span active for next()', (done) => {
       const incomingTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
       const incomingSpanId = '00f067aa0ba902b7';
@@ -117,23 +106,19 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
 
       middleware(req, res, () => {
         try {
-          // Request span should be stored on request
           const requestSpan = req._tracciaSpan;
           expect(requestSpan).toBeDefined();
           expect(requestSpan.context.traceId).toBe(incomingTraceId);
           expect(requestSpan.parentSpanId).toBe(incomingSpanId);
 
-          // Request span should be active in context during next()
           expect(getCurrentSpan()).toBe(requestSpan);
 
-          // A Traccia child span created inside handler inherits trace and request parent
           const tracer = tracciaProvider.getTracer('express-handler');
           const handlerSpan = tracer.startSpan('handler-operation');
           expect(handlerSpan.context.traceId).toBe(incomingTraceId);
           expect(handlerSpan.parentSpanId).toBe(requestSpan.context.spanId);
           handlerSpan.end();
 
-          // A native OTel child span created inside handler also inherits trace and request parent
           const nativeTracer = trace.getTracer('native-db');
           const nativeChild = nativeTracer.startSpan('db-query');
           expect(nativeChild.spanContext().traceId).toBe(incomingTraceId);
@@ -178,7 +163,6 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
           expect(requestSpan.context.traceId).toBe(incomingTraceId);
           expect(requestSpan.parentSpanId).toBe(incomingSpanId);
 
-          // Active in context
           expect(getCurrentSpan()).toBe(requestSpan);
 
           const tracer = tracciaProvider.getTracer('fastify-handler');
@@ -195,13 +179,13 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     });
   });
 
-  describe('Reproduction 3: Explicit parent traceFlags=0 and tracestate preservation', () => {
+  describe('W3C traceFlags and tracestate propagation', () => {
     it('preserves traceFlags=0 and tracestate when parentContext has traceFlags=0', () => {
       const tracer = tracciaProvider.getTracer('test-flags');
       const parentContext = {
         traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
         spanId: '00f067aa0ba902b7',
-        traceFlags: 0, // Unsampled
+        traceFlags: 0,
         traceState: 'vendor1=val1,vendor2=val2',
       };
 
@@ -209,7 +193,7 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
 
       expect(child.context.traceId).toBe(parentContext.traceId);
       expect(child.parentSpanId).toBe(parentContext.spanId);
-      expect(child.context.traceFlags).toBe(0); // Must remain 0, NOT become 1
+      expect(child.context.traceFlags).toBe(0);
       expect(child.context.traceState).toBe('vendor1=val1,vendor2=val2');
       child.end();
     });
@@ -217,7 +201,6 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     it('preserves traceFlags=0 and tracestate when options.parent has traceFlags=0', () => {
       const tracer = tracciaProvider.getTracer('test-flags-parent');
 
-      // Create a mock parent ISpan with unsampled flag and tracestate
       const parentSpan: ISpan = {
         context: {
           traceId: '7af83e4688b44ea7b4df838e1f1f5847',
@@ -242,7 +225,7 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
 
       expect(child.context.traceId).toBe(parentSpan.context.traceId);
       expect(child.parentSpanId).toBe(parentSpan.context.spanId);
-      expect(child.context.traceFlags).toBe(0); // Must remain 0
+      expect(child.context.traceFlags).toBe(0);
       expect(child.context.traceState).toBe('congo=uc,rojo=plain');
       child.end();
     });
@@ -281,8 +264,8 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     });
   });
 
-  describe('Reproduction 4: Bound callbacks preserve dynamic this receiver (Comment 2)', () => {
-    it('forwards the dynamic this receiver to bound functions instead of passing undefined', () => {
+  describe('Bound callbacks dynamic receiver preservation', () => {
+    it('forwards the dynamic this receiver to bound functions', () => {
       const tracer = tracciaProvider.getTracer('test-this-receiver');
       const testSpan = tracer.startSpan('this-receiver-span');
 
@@ -294,10 +277,8 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
       };
 
       const activeCtx = otelContext.active();
-      // Bind callback to active context
       const boundGetHeader = otelContext.bind(activeCtx, fakeResponse.getHeader);
 
-      // Invoking bound callback with dynamic receiver 'fakeResponse' must not throw
       expect(() => {
         const ct = boundGetHeader.call(fakeResponse, 'content-type');
         expect(ct).toBe('application/json');
@@ -308,7 +289,7 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     });
   });
 
-  describe('Reproduction 5: EventEmitter context binding preserves active span (Comment 3)', () => {
+  describe('EventEmitter context binding', () => {
     it('propagates bound context into listeners registered on bound EventEmitter', (done) => {
       const tracer = tracciaProvider.getTracer('test-ee-binding');
       const parentSpan = tracer.startSpan('ee-parent-span');
@@ -317,13 +298,10 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
         const ee = new EventEmitter();
         const activeCtx = otelContext.active();
 
-        // Bind emitter to current context
         const boundEE = otelContext.bind(activeCtx, ee);
 
-        // Register listener on bound emitter
         boundEE.on('data', () => {
           try {
-            // Listener should run with parentSpan active in OTel context
             const activeSpan = trace.getActiveSpan();
             expect(activeSpan?.spanContext().spanId).toBe(parentSpan.context.spanId);
             expect(activeSpan?.spanContext().traceId).toBe(parentSpan.context.traceId);
@@ -335,7 +313,6 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
           }
         });
 
-        // Emit from an isolated/different context
         otelContext.with(trace.setSpanContext(otelContext.active(), {
           traceId: '11111111111111111111111111111111',
           spanId: '2222222222222222',
@@ -347,7 +324,7 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
     });
   });
 
-  describe('Reproduction 6: Remote trace headers finalize guardrail state at local request boundary (Comment 1)', () => {
+  describe('Guardrail finalization at local request boundary', () => {
     it('Express middleware finalizes guardrail state despite remote parent and retains 0 traces in memory', (done) => {
       const guardrailProcessor = new GuardrailDetectorProcessor();
       tracciaProvider.addSpanProcessor(guardrailProcessor);
@@ -376,7 +353,6 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
         }),
       };
 
-      // Ensure getTracer uses tracciaProvider with our guardrail processor
       const autoModule = require('../auto');
       const originalGetTracer = autoModule.getTracer;
       autoModule.getTracer = (name: string) => tracciaProvider.getTracer(name);
@@ -390,10 +366,8 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
           expect(requestSpan.parentSpanId).toBe(incomingSpanId);
           expect(requestSpan.isLocalRoot).toBe(true);
 
-          // During request execution, guardrail state is accumulated
-          expect(guardrailProcessor.getTraceCount()).toBe(0); // Before any span ends
+          expect(guardrailProcessor.getTraceCount()).toBe(0);
 
-          // Add a guardrail child span inside request
           const tracer = tracciaProvider.getTracer('chat-agent');
           const childSpan = tracer.startSpan('llm-call', {
             attributes: {
@@ -402,20 +376,14 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
           });
           childSpan.end();
 
-          // After child span ends, state is accumulated for the trace
           expect(guardrailProcessor.getTraceCount()).toBe(1);
 
-          // Now response finishes at local request boundary
           for (const cb of listeners['finish'] || []) {
             cb();
           }
 
-          // Guardrail state should be finalized at the local boundary!
-          // 1. Guardrail summary should be written onto requestSpan
           expect(requestSpan.attributes['guardrail.summary']).toBeDefined();
           expect(requestSpan.attributes['guardrail.summary.coverage_confidence']).toBeDefined();
-
-          // 2. Trace state should be deleted from memory - 0 retained traces!
           expect(guardrailProcessor.getTraceCount()).toBe(0);
 
           done();
@@ -463,14 +431,12 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
           };
 
           middleware(req, res, () => {
-            // Finish the response
             for (const cb of listeners['finish'] || []) {
               cb();
             }
           });
         }
 
-        // 100 completed requests must retain 0 traces in memory
         expect(guardrailProcessor.getTraceCount()).toBe(0);
       } finally {
         autoModule.getTracer = originalGetTracer;
@@ -511,22 +477,103 @@ describe('Audit Finding 19: OTel Context Bridging and W3C Propagation', () => {
           },
         };
 
-        // onRequest hook
         hooks['onRequest'](req, {}, () => {});
 
         const requestSpan = req._tracciaSpan;
         expect(requestSpan).toBeDefined();
         expect(requestSpan.isLocalRoot).toBe(true);
 
-        // onResponse hook (request completion)
         hooks['onResponse'](req, { statusCode: 200 }, () => {});
 
-        // Summary written on requestSpan and 0 traces retained in memory
         expect(requestSpan.attributes['guardrail.summary']).toBeDefined();
         expect(guardrailProcessor.getTraceCount()).toBe(0);
       } finally {
         autoModule.getTracer = originalGetTracer;
       }
+    });
+  });
+
+  describe('Guardrail summary beneath native OTel parents', () => {
+    it('treats first Traccia span under native OTel parent as local boundary and writes summary', () => {
+      const guardrailProcessor = new GuardrailDetectorProcessor();
+      tracciaProvider.addSpanProcessor(guardrailProcessor);
+
+      const otelTracer = trace.getTracer('native-parent-tracer');
+      const nativeParent = otelTracer.startSpan('native-http-span');
+
+      otelContext.with(trace.setSpan(otelContext.active(), nativeParent), () => {
+        const tracciaTracer = tracciaProvider.getTracer('traccia-sub-tracer');
+        const tracciaSpan = tracciaTracer.startSpan('traccia-handler', {
+          attributes: { prompt: 'Test prompt beneath native span' },
+        });
+
+        // First Traccia span beneath native local parent acts as local boundary
+        expect(tracciaSpan.isLocalRoot).toBe(true);
+        expect(tracciaSpan.parentSpanId).toBe(nativeParent.spanContext().spanId);
+
+        tracciaSpan.end();
+
+        // Guardrail summary is written onto the Traccia boundary span
+        expect(tracciaSpan.attributes['guardrail.summary']).toBeDefined();
+        expect(guardrailProcessor.getTraceCount()).toBe(0);
+      });
+
+      nativeParent.end();
+    });
+  });
+
+  describe('Concurrent request guardrail state isolation', () => {
+    it('isolates guardrail findings across concurrent requests sharing the same trace ID', () => {
+      const guardrailProcessor = new GuardrailDetectorProcessor();
+      tracciaProvider.addSpanProcessor(guardrailProcessor);
+
+      const sharedTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const sharedParentContext = {
+        traceId: sharedTraceId,
+        spanId: '00f067aa0ba902b7',
+        traceFlags: 1,
+      };
+
+      const tracer = tracciaProvider.getTracer('concurrent-test');
+
+      // Request A starts with shared trace context
+      const rootSpanA = tracer.startSpan('request-A', { parentContext: sharedParentContext });
+      expect(rootSpanA.isLocalRoot).toBe(true);
+
+      // Request B starts concurrently with the same shared trace context
+      const rootSpanB = tracer.startSpan('request-B', { parentContext: sharedParentContext });
+      expect(rootSpanB.isLocalRoot).toBe(true);
+      expect(rootSpanB.context.traceId).toBe(rootSpanA.context.traceId);
+      expect(rootSpanB.context.spanId).not.toBe(rootSpanA.context.spanId);
+
+      // Request A runs an operation that triggers a guardrail finding
+      const childSpanA = tracer.startSpan('child-op-A', {
+        parent: rootSpanA,
+        attributes: {
+          'span.type': 'guardrail',
+          'guardrail.name': 'pii_filter',
+          'guardrail.category': 'pii',
+          'guardrail.triggered': true,
+        },
+      });
+      childSpanA.end();
+
+      // Request B finishes first
+      rootSpanB.end();
+
+      // Request B must not receive Request A's findings
+      expect(rootSpanB.attributes['guardrail.findings']).toBeUndefined();
+      expect(rootSpanB.attributes['guardrail.finding.count']).toBeUndefined();
+
+      // Request A finishes second
+      rootSpanA.end();
+
+      // Request A must receive its own findings
+      expect(rootSpanA.attributes['guardrail.findings']).toBeDefined();
+      expect(rootSpanA.attributes['guardrail.finding.count']).toBeGreaterThan(0);
+
+      // Memory must be completely finalized
+      expect(guardrailProcessor.getTraceCount()).toBe(0);
     });
   });
 });

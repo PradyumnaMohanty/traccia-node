@@ -55,6 +55,7 @@ export interface ISpan {
   otelSpan?: OTelSpan;
   isRemoteParent?: boolean;
   isLocalRoot?: boolean;
+  localRootSpanId?: string;
 }
 
 /**

@@ -21,6 +21,7 @@ export class Span implements ISpan {
   public otelSpan: OTelSpan;
   public isRemoteParent: boolean;
   public isLocalRoot: boolean;
+  public localRootSpanId?: string;
 
   private provider?: TracerProvider;
   private ended = false;
@@ -32,7 +33,8 @@ export class Span implements ISpan {
     parentSpanId?: string,
     attributes?: Record<string, unknown>,
     isRemoteParent: boolean = false,
-    isLocalRoot?: boolean
+    isLocalRoot?: boolean,
+    localRootSpanId?: string
   ) {
     this.name = name;
     this.otelSpan = otelSpan;
@@ -42,6 +44,7 @@ export class Span implements ISpan {
     this.startTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
     this.isRemoteParent = isRemoteParent;
     this.isLocalRoot = isLocalRoot ?? (parentSpanId === undefined || isRemoteParent);
+    this.localRootSpanId = localRootSpanId ?? (this.isLocalRoot ? otelSpan.spanContext().spanId : undefined);
   }
 
   get context(): ISpanContext {

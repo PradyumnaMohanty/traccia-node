@@ -42,6 +42,7 @@ export class Tracer implements ITracer {
     let activeContext = otelContext.active();
     let isRemoteParent = false;
     let isLocalRoot = false;
+    let localRootSpanId: string | undefined;
 
     if (options?.parentContext) {
       // Create a remote span context and set it as active
@@ -62,6 +63,7 @@ export class Tracer implements ITracer {
       });
     } else if (options?.parent) {
       activeContext = getOtelContextForSpan(options.parent);
+      localRootSpanId = options.parent.localRootSpanId || (options.parent.isLocalRoot ? options.parent.context.spanId : undefined);
     } else if (options?.parent === null) {
       // Explicitly detach from current active span context
       activeContext = ROOT_CONTEXT;
@@ -70,15 +72,17 @@ export class Tracer implements ITracer {
       // Automatically pull parent from Traccia context if available
       const currentSpan = getCurrentSpan();
       if (currentSpan) {
-        activeContext = getOtelContextForSpan(currentSpan);
+        if (!trace.getSpan(activeContext)) {
+          activeContext = getOtelContextForSpan(currentSpan);
+        }
+        localRootSpanId = currentSpan.localRootSpanId || (currentSpan.isLocalRoot ? currentSpan.context.spanId : undefined);
       } else {
         const activeSpanContext = trace.getSpanContext(activeContext);
         if (activeSpanContext?.isRemote) {
           isRemoteParent = true;
-          isLocalRoot = true;
-        } else if (!activeSpanContext || !activeSpanContext.traceId) {
-          isLocalRoot = true;
         }
+        // First Traccia span in context acts as the local boundary
+        isLocalRoot = true;
       }
     }
 
@@ -99,7 +103,8 @@ export class Tracer implements ITracer {
       parentSpanId,
       options?.attributes,
       isRemoteParent,
-      isLocalRoot
+      isLocalRoot,
+      localRootSpanId
     );
   }
 

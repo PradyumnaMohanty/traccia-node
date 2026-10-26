@@ -7,7 +7,7 @@
  * root span when it ends -- by that point all child spans have already been
  * processed, so the full picture is available.
  * 
- * State is scoped by trace_id, making this safe for concurrent runs.
+ * State is scoped by trace ID and local request root.
  */
 
 import { ISpan, ISpanProcessor } from "../types";
@@ -82,8 +82,11 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
         }
       }
 
-      // Accumulate into trace-scoped state
-      let state = this.traces.get(traceId);
+      // Scope state to trace ID and local request root if present
+      const isLocalRoot = span.isLocalRoot ?? (span.parentSpanId === undefined || Boolean(span.isRemoteParent));
+      const scopeKey = span.localRootSpanId ? `${traceId}:${span.localRootSpanId}` : traceId;
+
+      let state = this.traces.get(scopeKey);
       if (!state) {
         if (this.traces.size >= GuardrailDetectorProcessor.MAX_TRACES) {
           const oldestKey: string | undefined = this.traces.keys().next().value as string | undefined;
@@ -92,20 +95,17 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
           }
         }
         state = { spanAttrs: [], spanIds: [], findings: [] };
-        this.traces.set(traceId, state);
+        this.traces.set(scopeKey, state);
       }
       state.spanAttrs.push(attrs);
       state.spanIds.push(spanId);
       state.findings.push(...findings);
 
-      // If this is the root span or local request boundary, compute and write the aggregated summary
-      // Finalize state at the local request boundary despite a remote parent
-      const isLocalRoot = span.isLocalRoot ?? (span.parentSpanId === undefined || Boolean(span.isRemoteParent));
+      // Finalize aggregated summary on local request root
       if (isLocalRoot) {
-        this.writeSummary(span, traceId);
+        this.writeSummary(span, scopeKey);
       }
     } catch (exc) {
-      // Log warning but don't crash
       console.warn(
         `[Traccia] GuardrailDetectorProcessor.onEnd failed: ${exc instanceof Error ? exc.message : String(exc)}`,
       );
@@ -115,15 +115,15 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
   /**
    * Compute the full guardrail summary and write it onto the root span.
    */
-  private writeSummary(span: ISpan, traceId: string): void {
-    const state = this.traces.get(traceId);
+  private writeSummary(span: ISpan, scopeKey: string): void {
+    const state = this.traces.get(scopeKey);
 
     if (!state) {
       return;
     }
 
-    // Remove this trace state now that we're processing the summary
-    this.traces.delete(traceId);
+    // Remove trace state once summary is processed
+    this.traces.delete(scopeKey);
 
     try {
       const summary = evaluateRun({

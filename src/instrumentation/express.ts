@@ -123,6 +123,9 @@ export function expressMiddleware(
             : tracer.startSpan(name);
 
         span.isLocalRoot = true;
+        if (span.context?.spanId) {
+            span.localRootSpanId = span.context.spanId;
+        }
 
         // Set basic attributes
         span.setAttribute('span.type', 'TOOL');
